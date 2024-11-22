@@ -5,14 +5,23 @@ from sklearn.linear_model import LinearRegression
 from datetime import datetime, timedelta
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
+from scipy.stats import chisquare
+from scipy.optimize import curve_fit
+from scipy import stats
 
 # Load the tokenizer and model
 tokenizer = AutoTokenizer.from_pretrained("cardiffnlp/twitter-roberta-base-sentiment-latest")
 model = AutoModelForSequenceClassification.from_pretrained("cardiffnlp/twitter-roberta-base-sentiment-latest")
 
 
+
+
+
+
 # Define the starting date
 start_date = datetime(2024, 8, 16)
+target_date = pd.Timestamp(2025,2,1)
+
 
 # Data (Cleaned in one go within the function)
 weights_list = [
@@ -110,8 +119,7 @@ result = analyze_sentiments(comments_list)
 print("Sentiment Counts:", result)
 
 
-
-def Analyse_Data(weights_list, carb_intensity_list, comments_list, calories_list, start_date, goal, goal_weight):
+def Analyse_Data(weights_list, carb_intensity_list, comments_list, calories_list, start_date, goal, goal_weight, target_date):
     # Prepare lists for DataFrame columns
     dates = [start_date + timedelta(days=i) for i in range(len(weights_list))]
     
@@ -125,23 +133,43 @@ def Analyse_Data(weights_list, carb_intensity_list, comments_list, calories_list
         "Calories": calories_list
     })
     
+    ## Define a target log model for whatever the goal weight is
+    start_weight = weights_list[0]
+    total_days = (target_date - start_date).days
+    a = (goal_weight - start_weight) / np.log(total_days + 1)
+    b = start_weight
     
+    def log_model(x):
+            return a * np.log(x + 1) + b
     
-    # sentiment analysis bit
+    df['target_weights'] = log_model(df['index'])
+    
+    # RMSE test
+    observed = df['weights']
+    expected = df['target_weights']
+    rmse = np.sqrt(np.mean((observed - expected)**2))
+    
+    mean_weight = np.mean(observed)
+    rmse_threshold = 0.1 * mean_weight  # 10% of mean weight
+    
+    # Result based on RMSE threshold
+    rmse_result = "Fail to reject" if rmse < rmse_threshold else "Reject"
+    
+    # Sentiment analysis bit
     results = analyze_sentiments(list(df['comments']))
-    result=results[0]
-    lst_of_labels=results[1]
-    if len(lst_of_labels) >14:
-        last2weekslst=lst_of_labels[-14]
+    sentiment_result = results[0]
+    lst_of_labels = results[1]
+    
+    if len(lst_of_labels) > 14:
+        last2weekslst = lst_of_labels[-14]
     else:
-        last2weekslst=lst_of_labels
+        last2weekslst = lst_of_labels
     
     for i in range(len(last2weekslst)-3):
-        if last2weekslst[i]=="Negative" and last2weekslst[i+1]=="Negative" and last2weekslst[i]=="Negative":
-            commentonsentiment = " Looks like things over the last few days have been suboptimal, has nutrition been on point?"
+        if last2weekslst[i] == "Negative" and last2weekslst[i+1] == "Negative" and last2weekslst[i] == "Negative":
+            comment_on_sentiment = "Looks like things over the last few days have been suboptimal, has nutrition been on point? you've had some negative streaks in this period. Take a deload if this is related to recovery."
         else:
-            commentonsentiment = "Looks good buddy diet's been on point"
-        
+            comment_on_sentiment = "Looks good buddy diet's been on point, youve had consistently good periods of time with no negative streaks, keep going the way you're going."
     
     # Calculate moving averages
     df["5_day_moving_avg"] = df["weights"].rolling(window=5, min_periods=1).mean()
@@ -160,7 +188,7 @@ def Analyse_Data(weights_list, carb_intensity_list, comments_list, calories_list
     plt.legend()
 
     # Weight change calculations
-    Weight_Loss_abs = abs(df['weights'].iloc[2] - df['weights'].iloc[-1])
+    weight_loss_abs = abs(df['weights'].iloc[2] - df['weights'].iloc[-1])
     theor_weight_loss = df['5_day_moving_avg'].iloc[5] - df['5_day_moving_avg'].iloc[-1]
 
     # Linear regression
@@ -168,13 +196,13 @@ def Analyse_Data(weights_list, carb_intensity_list, comments_list, calories_list
     y = np.array(df['weights'])
     model = LinearRegression().fit(x, y)
     
-    # prediction ( linear regression bad practise)
+    # Prediction (linear regression)
     last_index = df['index'].iloc[-1]
     array_of_goals = np.array([last_index + 14]).reshape(-1, 1)
     y_pred = model.predict(array_of_goals)
 
     # Logarithmic regression
-    x_log = np.log(x + 1)  # +1 to Prevent log(0) error
+    x_log = np.log(x + 1)  # +1 to prevent log(0) error
     model_log = LinearRegression().fit(x_log, y)
     y_pred_log = model_log.predict(np.log(array_of_goals + 1))
 
@@ -199,28 +227,65 @@ def Analyse_Data(weights_list, carb_intensity_list, comments_list, calories_list
     else:
         current_status = "not on track"
 
-    # Final output dictionary
-    result = {
-        'final_weight': df['weights'].iloc[-1],
-        'current_moving_avg': df["5_day_moving_avg"].iloc[-1],
-        'weight_loss': Weight_Loss_abs,
-        'Moving Avg Weight Change': abs(theor_weight_loss),
-        'model_pred_14_days': y_pred[0],
-        'log_pred_14_days': y_pred_log[0],
-        'rate_of_change': rate_of_change,
-        'days_left_to_goal': days_left,
-        'calorie_average': avg_calories,
-        'status': current_status,
-        'weekly_changes': week_on_week_change,
-        'Number of good and bad days' : result,
-        'Comment On sentiment': commentonsentiment,
-        
-    }
 
-    return result
+    # Prepare the data for DataFrame
+    result = {
+        'Metric': [
+            'Final Weight',
+            'Current Moving Avg',
+            'Weight Loss (Absolute)',
+            'Moving Avg Weight Change',
+            'Model Prediction (14 Days)',
+            'Logarithmic Prediction (14 Days)',
+            'Rate of Change',
+            'Days Left to Goal',
+            'Average Calories',
+            'Status (Goal)',
+            'Weekly Changes (Wk-on-Wk)',
+            'RMSE Value',
+            'RMSE Threshold',
+            'RMSE Test Result',
+            'Number of Good and Bad Days',
+            'Comment on Sentiment'
+        ],
+        'Value': [
+            df['weights'].iloc[-1],                             
+            df["5_day_moving_avg"].iloc[-1],                     
+            weight_loss_abs,                                     
+            abs(theor_weight_loss),                              
+            y_pred[0],                                           
+            y_pred_log[0],                                       
+            rate_of_change,                                      
+            days_left,                                           
+            avg_calories,                                        
+            current_status,                                      
+            week_on_week_change,                                 
+            rmse,                                                
+            rmse_threshold,                                      
+            rmse_result,                                         
+            sentiment_result,                                    
+            comment_on_sentiment                                 
+        ]
+    }
+    
+    df_result = pd.DataFrame(result)
+    
+    
+
+
+    return df_result
 
 # Example function call
 goal = "bulk"
 goal_weight = 75
-result = Analyse_Data(weights_list, carb_intensity_list, comments_list, calories_list, start_date, goal, goal_weight)
+result = Analyse_Data(weights_list, carb_intensity_list, comments_list, calories_list, start_date, goal, goal_weight, target_date)
 print(result)
+
+
+
+
+
+
+
+
+
